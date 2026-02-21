@@ -95,3 +95,5 @@ Ensure your AOI and optional flood assets are accessible.
 Run the script and inspect layers in the map.
 
 Start exports from the Tasks tab.
+
+![flood risk extent example](image.png)
