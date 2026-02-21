@@ -1,0 +1,266 @@
+/*******************************************************
+  VALENCIA FLOOD SUSCEPTIBILITY (Risk Map Only)
+  - Continuous susceptibility + classes + masks
+  - Inputs: SRTM, MERIT Hydro, ESA WorldCover
+*******************************************************/
+
+// -------------------------------
+// 0) AOI
+// -------------------------------
+var gns = ee.FeatureCollection('projects/inspired-bus-478401-r1/assets/tumizmir');
+var AOI = gns.geometry();
+
+Map.centerObject(AOI, 10);
+Map.addLayer(gns, {}, 'Valencia Boundary');
+
+// -------------------------------
+// 1) Land Cover (ESA WorldCover v100)
+// -------------------------------
+var lc_raw = ee.ImageCollection('ESA/WorldCover/v100')
+  .first()
+  .select('Map')
+  .clip(AOI);
+
+// Permanent water (ESA class 80)
+var permanent_water_esa = lc_raw.eq(80);
+
+// Aggressive land cover risk (1..5)
+var land_cover_risk = lc_raw.remap(
+  [10, 20, 30, 40, 50, 60, 70, 90, 95, 100],
+  [4,  5,  4,  5,  5,  5,  3,  5,  5,  4]
+).rename('land_cover_risk')
+ .updateMask(permanent_water_esa.not())
+ .unmask(0);
+
+// -------------------------------
+// 2) DEM + Elevation risk (SRTM)
+// -------------------------------
+var dem = ee.Image('USGS/SRTMGL1_003').clip(AOI);
+
+var elev_risk = ee.Image(1).rename('elevation_risk')
+  .where(dem.gt(100), 1)
+  .where(dem.gt(40).and(dem.lte(100)), 2)
+  .where(dem.gt(20).and(dem.lte(40)), 3)
+  .where(dem.gt(10).and(dem.lte(20)), 4)
+  .where(dem.gte(0).and(dem.lte(10)), 5)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 3) Slope risk
+// -------------------------------
+var slope = ee.Terrain.slope(dem);
+
+var slope_risk = ee.Image(1).rename('slope_risk')
+  .where(slope.gt(6), 1)
+  .where(slope.gt(3).and(slope.lte(6)), 2)
+  .where(slope.gt(1.5).and(slope.lte(3)), 3)
+  .where(slope.gt(0.5).and(slope.lte(1.5)), 4)
+  .where(slope.gte(0).and(slope.lte(0.5)), 5)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 4) TWI risk (MERIT upa + slope)
+// -------------------------------
+var upa = ee.Image('MERIT/Hydro/v1_0_1').select('upa').clip(AOI);
+
+// NOTE: Bu, senin paylaştığın koddaki aynı TWI yaklaşımıdır.
+// (İstersen daha doğru TWI formülüne de çevirebilirim.)
+var slopePercent = slope.divide(100).max(0.001);
+var TWI = upa.add(1).log()
+  .divide(slopePercent.tan().log())
+  .rename('twi');
+
+var twi_risk = ee.Image(1).rename('twi_risk')
+  .where(TWI.gt(8), 5)
+  .where(TWI.gt(6).and(TWI.lte(8)), 4)
+  .where(TWI.gt(4).and(TWI.lte(6)), 3)
+  .where(TWI.gt(3).and(TWI.lte(4)), 2)
+  .where(TWI.lte(3), 1)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 5) Distance to (permanent) water risk
+// -------------------------------
+var dist_water = permanent_water_esa
+  .fastDistanceTransform().sqrt()
+  .multiply(ee.Image.pixelArea().sqrt())
+  .rename('distance_water')
+  .clip(AOI);
+
+var dist_water_risk = ee.Image(1).rename('dist_water_risk')
+  .where(dist_water.gt(2000), 1)
+  .where(dist_water.gt(1000).and(dist_water.lte(2000)), 2)
+  .where(dist_water.gt(500).and(dist_water.lte(1000)), 3)
+  .where(dist_water.gt(250).and(dist_water.lte(500)), 4)
+  .where(dist_water.gte(0).and(dist_water.lte(250)), 5)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 6) HAND risk (MERIT hnd)
+// -------------------------------
+var hand = ee.Image('MERIT/Hydro/v1_0_1').select('hnd').clip(AOI);
+
+var hand_risk = ee.Image(1).rename('hand_risk')
+  .where(hand.gt(15), 1)
+  .where(hand.gt(7).and(hand.lte(15)), 2)
+  .where(hand.gt(4).and(hand.lte(7)), 3)
+  .where(hand.gt(2).and(hand.lte(4)), 4)
+  .where(hand.gte(0).and(hand.lte(2)), 5)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 7) Drainage risk (MERIT upa)
+// -------------------------------
+var drainage_risk = ee.Image(1).rename('drainage_risk')
+  .where(upa.gt(1500), 5)
+  .where(upa.gt(300).and(upa.lte(1500)), 4)
+  .where(upa.gt(30).and(upa.lte(300)), 3)
+  .where(upa.gt(3).and(upa.lte(30)), 2)
+  .where(upa.lte(3), 1)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 8) Curvature risk (from DEM)
+// -------------------------------
+var gaussianKernel = ee.Kernel.gaussian({
+  radius: 3,
+  units: 'pixels',
+  normalize: true
+});
+
+var curvature = dem
+  .convolve(gaussianKernel)
+  .subtract(dem)
+  .rename('curvature')
+  .clip(AOI);
+
+var curv_risk = ee.Image(3).rename('curv_risk')
+  .where(curvature.lt(-0.5), 5)
+  .where(curvature.lt(-0.2).and(curvature.gte(-0.5)), 4)
+  .where(curvature.gte(-0.2).and(curvature.lte(0.2)), 3)
+  .where(curvature.gt(0.2).and(curvature.lte(0.5)), 2)
+  .where(curvature.gt(0.5), 1)
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// -------------------------------
+// 9) Weighted Linear Combination (Continuous Susceptibility)
+// -------------------------------
+var risk_stack = ee.Image.cat([
+  land_cover_risk, elev_risk, slope_risk, twi_risk,
+  dist_water_risk, hand_risk, drainage_risk, curv_risk
+]);
+
+var FloodSusceptibility = risk_stack.expression(
+  '2.0*lc + 3.5*e + 3.5*s + 4.5*twi + 2.5*d + 5.0*h + 3.5*dr + 2.0*c', {
+    lc: risk_stack.select('land_cover_risk'),
+    e:  risk_stack.select('elevation_risk'),
+    s:  risk_stack.select('slope_risk'),
+    twi:risk_stack.select('twi_risk'),
+    d:  risk_stack.select('dist_water_risk'),
+    h:  risk_stack.select('hand_risk'),
+    dr: risk_stack.select('drainage_risk'),
+    c:  risk_stack.select('curv_risk')
+}).rename('susceptibility')
+  .updateMask(permanent_water_esa.not())
+  .clip(AOI)
+  .unmask(0);
+
+// Visualize continuous
+Map.addLayer(FloodSusceptibility,
+  {min:20, max:100, palette:['darkgreen','green','yellow','orange','red','darkred']},
+  'Susceptibility (continuous)', true
+);
+
+// -------------------------------
+// 10) Classify into 1..5 using percentiles
+// -------------------------------
+var stats = FloodSusceptibility.updateMask(FloodSusceptibility.gt(0)).reduceRegion({
+  reducer: ee.Reducer.percentile([10, 25, 45, 65]),
+  geometry: AOI,
+  scale: 30,
+  bestEffort: true,
+  maxPixels: 1e13
+});
+
+var p10 = ee.Number(stats.get('susceptibility_p10'));
+var p25 = ee.Number(stats.get('susceptibility_p25'));
+var p45 = ee.Number(stats.get('susceptibility_p45'));
+var p65 = ee.Number(stats.get('susceptibility_p65'));
+
+print('Susceptibility thresholds:', {p10:p10, p25:p25, p45:p45, p65:p65});
+
+var SusceptibilityClass = ee.Image(1)
+  .where(FloodSusceptibility.gt(p10).and(FloodSusceptibility.lte(p25)), 2)
+  .where(FloodSusceptibility.gt(p25).and(FloodSusceptibility.lte(p45)), 3)
+  .where(FloodSusceptibility.gt(p45).and(FloodSusceptibility.lte(p65)), 4)
+  .where(FloodSusceptibility.gt(p65), 5)
+  .updateMask(permanent_water_esa.not())
+  .updateMask(FloodSusceptibility.gt(0))
+  .clip(AOI)
+  .rename('susceptibility_class');
+
+// Visualize classes
+var susceptPalette = ['darkgreen','yellowgreen','yellow','orange','red'];
+Map.addLayer(SusceptibilityClass,
+  {min:1, max:5, palette:susceptPalette},
+  'Susceptibility Class (1..5)', true
+);
+
+// Masks (opsiyonel)
+var ModerateOrHigher = SusceptibilityClass.gte(4).selfMask().rename('moderate_plus');
+var HighVeryHigh = SusceptibilityClass.gte(4).selfMask().rename('high_veryhigh');
+var VeryHighOnly = SusceptibilityClass.eq(5).selfMask().rename('veryhigh');
+
+Map.addLayer(ModerateOrHigher, {palette:['FFFF00']}, 'Moderate+ (>=3)', false);
+Map.addLayer(HighVeryHigh, {palette:['FFA500']}, 'High+VeryHigh (>=4)', false);
+Map.addLayer(VeryHighOnly, {palette:['FF0000']}, 'VeryHigh only (=5)', false);
+
+// -------------------------------
+// 11) Exports (optional)
+// -------------------------------
+Export.image.toDrive({
+  image: FloodSusceptibility,
+  description: 'Valencia_Susceptibility_Continuous',
+  folder: 'GEE',
+  fileNamePrefix: 'valencia_susceptibility_continuous',
+  region: AOI,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: SusceptibilityClass.toByte(),
+  description: 'Valencia_Susceptibility_Class',
+  folder: 'GEE',
+  fileNamePrefix: 'valencia_susceptibility_class_1to5',
+  region: AOI,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+Export.image.toDrive({
+  image: ModerateOrHigher.toByte(),
+  description: 'ModerateOrHigher',
+  folder: 'GEE',
+  fileNamePrefix: 'ModerateOrHigher',
+  region: AOI,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+var flood = ee.Image('projects/inspired-bus-478401-r1/assets/valenciaflood')
+Map.addLayer(flood, {}, 'actualflood')
